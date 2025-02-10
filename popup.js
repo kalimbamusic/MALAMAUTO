@@ -152,93 +152,116 @@ document.getElementById('checkHRPortalData').addEventListener('click', async () 
 });
 
 async function checkCalendarAndStorage() {
-    async function waitForElement(selector, parent = document, timeout = 5000) {
-        const startTime = Date.now();
-        while (Date.now() - startTime < timeout) {
-            const element = parent.querySelector(selector);
-            if (element) return element;
-            await new Promise(resolve => setTimeout(resolve, 100)); // Wait 100ms
+  // Utility function to wait for elements
+  async function waitForElement(selector, parent = document, timeout = 5000) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout) {
+      const element = parent.querySelector(selector);
+      if (element) return element;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error(`Element not found: ${selector}`);
+  }
+
+  // Get stored hours from Chrome storage
+  async function getStoredHours() {
+    return new Promise(resolve => {
+      chrome.storage.local.get(['extractedHours'], result => {
+        resolve(result.extractedHours || {});
+      });
+    });
+  }
+
+  // Set input value with event triggering
+  async function setInputValue(selector, value) {
+    const input = await waitForElement(selector);
+    input.value = value;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    console.log(`✅ Set value for ${selector}: ${value}`);
+  }
+
+  // Wait for modal to close
+  async function waitForModalClose() {
+    return new Promise(resolve => {
+      new MutationObserver((_, observer) => {
+        if (!document.querySelector('.report-form-wrapper__content')) {
+          observer.disconnect();
+          resolve();
         }
-        throw new Error(`Element ${selector} not found within ${timeout}ms`);
+      }).observe(document.body, { childList: true, subtree: true });
+    });
+  }
+
+  // Dismiss success toast
+  async function dismissToast() {
+    try {
+      const toast = await waitForElement('.Toastify__toast', document, 3000);
+      const closeButton = toast.querySelector('.payroll-toast__close-button') || toast;
+      closeButton.click();
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } catch {
+      console.log('ℹ️ No toast to dismiss');
     }
+  }
 
-    function getStoredHours() {
-        return new Promise(resolve => {
-            chrome.storage.local.get(['extractedHours'], function(result) {
-                resolve(result.extractedHours || {});
-            });
-        });
+  // Main processing function
+  async function processDate(dateClass, hours) {
+    try {
+      console.log(`🔄 Processing ${dateClass}`);
+      
+      // 2. Find date element
+      const dayElement = await waitForElement(`div.cv-day[class*="${dateClass}"]:not(.outsideOfMonth)`);
+      
+      // 3. Check for existing reports
+      if (dayElement.querySelector('.timesheets-calendar__day--success')) {
+        console.log(`⏭️ Skipping ${dateClass} (existing report)`);
+        return;
+      }
+
+      // 4. Open date modal
+      dayElement.click();
+      await waitForElement('.report-form-wrapper__content');
+
+      // 5. Fill time inputs
+      const addButton = await waitForElement('button:has(span.v-btn__content i.far.fa-plus)');
+      addButton.click();
+      
+      await setInputValue('input[aria-label="שדה טקסט שעת כניסה"]', hours.entrance);
+      await setInputValue('input[aria-label="שדה טקסט שעת יציאה"]', hours.exit);
+
+      // 6. Save and clean up
+      const saveButton = await waitForElement('button[data-cy="timesheets-save-report-btn"]');
+      saveButton.click();
+      await dismissToast();
+      await waitForModalClose();
+
+      // 7. Stabilize calendar
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await waitForElement('div.cv-day:not(.cv-day-loading)');
+
+    } catch (error) {
+      console.error(`❌ Error processing ${dateClass}:`, error.message);
+      await dismissToast(); // Cleanup on error
     }
+  }
 
-    async function setInputValue(selector, value) {
-        const inputField = await waitForElement(selector, document, 5000);
-        if (!inputField) {
-            console.log(`Input field ${selector} not found.`);
-            return;
-        }
-
-        inputField.focus();
-        inputField.value = value;
-        
-        // Dispatch input and change events
-        inputField.dispatchEvent(new Event('input', { bubbles: true }));
-        inputField.dispatchEvent(new Event('change', { bubbles: true }));
-        inputField.dispatchEvent(new Event('blur'));
-        
-        console.log(`Set value for ${selector}: ${value}`);
-    }
-
-    const calendarDays = document.querySelectorAll('div.cv-day[aria-label]');
-    console.log(calendarDays);
-    if (calendarDays.length === 0) return console.log('No calendar day elements found.');
-
-    const filteredDays = Array.from(calendarDays).filter(dayElement => !dayElement.classList.contains('outsideOfMonth'));
-    if (filteredDays.length === 0) return console.log('No relevant calendar day elements found.');
-
+  // Main execution flow
+  try {
     const storedHours = await getStoredHours();
-
-    for (const dayElement of filteredDays) {
-        // Match date format with Malam's class system
-        const dateClass = Array.from(dayElement.classList)
-                          .find(c => c.startsWith('d20'))
-                          ?.replace('cv-day-', '');
-
-        if (storedHours[dateClass]) {
-            console.log('Clicking day:', dayElement);
-            dayElement.click();
-            
-            try {
-                // Wait for dialog animation
-                await waitForElement('div.report-form-wrapper__content', document, 5000);
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                
-                // Check if form is fully loaded
-                const addButton = await waitForElement('button:has(span.v-btn__content i.far.fa-plus)', document, 3000);
-                addButton.click();
-                await new Promise(resolve => setTimeout(resolve, 1000));
-
-                if (storedHours[dateClass]?.entrance) {
-                    await setInputValue('input[aria-label="שדה טקסט שעת כניסה"]', storedHours[dateClass].entrance);
-                }
-
-                if (storedHours[dateClass]?.exit) {
-                    await setInputValue('input[aria-label="שדה טקסט שעת יציאה"]', storedHours[dateClass].exit);
-                }
-
-                const saveButton = await waitForElement('button[data-cy="timesheets-save-report-btn"]', document, 5000);
-                saveButton.click();
-                await new Promise(resolve => setTimeout(resolve, 1000));
-
-                 // Wait for the success toast notification
-                await waitForElement('div[class*="Toastify__toast-success"]', document, 5000);
-
-            } catch (error) {
-                console.error('Error processing day:', error);
-            }
-        } else {
-            console.log(`No stored hours for ${dateClass}, skipping click.`);
-        }
+    const dates = Object.entries(storedHours);
+    
+    console.log(`📅 Starting processing of ${dates.length} dates`);
+    
+    for (const [dateClass, hours] of dates) {
+      await processDate(dateClass, hours);
     }
+    
+    console.log('🎉 All dates processed successfully');
+
+  } catch (error) {
+    console.error('💥 Critical error:', error);
+  }
 }
 
 function displayResults(data) {
